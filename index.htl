@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Wii News Channel WebXR - Meta Quest 3</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script type="importmap">
+  {"imports": {"three": "https://unpkg.com/three@0.150.1/build/three.module.js"}}
+  </script>
+  <style>
+    body{margin:0;overflow:hidden;font-family:Arial;background:linear-gradient(135deg,#1e3c72,#2a5298)}
+    #overlay{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;display:flex;align-items:center;justify-content:center}
+    #start-button{width:100%;height:100%;font-size:120px;background:linear-gradient(135deg,#00b4db,#0083b0);color:white;border:none;cursor:pointer;transition:all 0.3s}
+    #start-button:hover{background:linear-gradient(135deg,#0083b0,#005f7f)}
+    .webxr-hidden{display:none!important}
+  </style>
+</head>
+<body>
+<div id="overlay"><button id="start-button">🌍</button></div>
+<script type="module">
+import*as THREE from'three';
+import{FontLoader}from'https://unpkg.com/three@0.150.1/examples/jsm/loaders/FontLoader.js';
+import{TextGeometry}from'https://unpkg.com/three@0.150.1/examples/jsm/geometries/TextGeometry.js';
+
+let camera,scene,renderer,globe,newsMarkers=[],activeNews=0,font,newsData=[],newsText,newsPanel;
+let controllers=[],xrSession,clock=new THREE.Clock(),autoRotate=true,focusTime=0;
+
+// Mock news data (replace with real API)
+const mockNews=[
+{lat:40.7,lon:-74,city:"New York",headline:"Tech Giants Report Record Earnings",country:"USA"},
+{lat:51.5,lon:-0.1,city:"London",headline:"Climate Summit Reaches New Agreement",country:"UK"},
+{lat:35.7,lon:139.7,city:"Tokyo",headline:"Robotics Expo Opens to Public",country:"Japan"},
+{lat:-33.9,lon:151.2,city:"Sydney",headline:"Renewable Energy Milestone Achieved",country:"Australia"},
+{lat:48.9,lon:2.4,city:"Paris",headline:"Art Exhibition Breaks Attendance Records",country:"France"},
+{lat:55.8,lon:37.6,city:"Moscow",headline:"Space Mission Successfully Launches",country:"Russia"},
+{lat:-23.5,lon:-46.6,city:"São Paulo",headline:"Football Championship Finals Tonight",country:"Brazil"},
+{lat:39.9,lon:116.4,city:"Beijing",headline:"AI Research Breakthrough Announced",country:"China"},
+{lat:28.6,lon:77.2,city:"Delhi",headline:"Solar Power Initiative Expands",country:"India"},
+{lat:-26.2,lon:28.0,city:"Johannesburg",headline:"Mining Innovation Reduces Emissions",country:"S.Africa"}
+];
+
+async function init(){
+scene=new THREE.Scene();
+camera=new THREE.PerspectiveCamera(70,window.innerWidth/window.innerHeight,0.01,20);
+renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+renderer.setSize(window.innerWidth,window.innerHeight);
+renderer.xr.enabled=true;
+renderer.setClearColor(0x000000,0);
+document.body.appendChild(renderer.domElement);
+
+// Lighting
+scene.add(new THREE.AmbientLight(0x404040,2));
+const light=new THREE.DirectionalLight(0xffffff,1);
+light.position.set(5,5,5);
+scene.add(light);
+
+// Create globe
+createGlobe();
+// Load font
+loadFont();
+// Initialize news
+newsData=mockNews;
+createNewsMarkers();
+createNewsPanel();
+
+document.getElementById('start-button').addEventListener('click',startARSession);
+window.addEventListener('resize',()=>{
+camera.aspect=window.innerWidth/window.innerHeight;
+camera.updateProjectionMatrix();
+renderer.setSize(window.innerWidth,window.innerHeight);
+});
+}
+
+function createGlobe(){
+const globeGroup=new THREE.Group();
+// Earth sphere
+const earthGeo=new THREE.SphereGeometry(0.25,32,32);
+const earthTex=new THREE.TextureLoader().load('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4/5+hHgAF/wJ/0ePfvQAAAABJRU5ErkJggg==');
+const earthMat=new THREE.MeshPhongMaterial({
+color:0x2233ff,
+emissive:0x112244,
+specular:0x333333,
+shininess:25,
+opacity:0.9,
+transparent:true
+});
+const earth=new THREE.Mesh(earthGeo,earthMat);
+globeGroup.add(earth);
+
+// Wireframe overlay
+const wireGeo=new THREE.SphereGeometry(0.252,16,16);
+const wireMat=new THREE.MeshBasicMaterial({color:0x00ffff,wireframe:true,opacity:0.3,transparent:true});
+const wire=new THREE.Mesh(wireGeo,wireMat);
+globeGroup.add(wire);
+
+// Position globe
+globeGroup.position.set(0,0,-0.7);
+scene.add(globeGroup);
+globe=globeGroup;
+
+// Add continents (simplified)
+const landGeo=new THREE.SphereGeometry(0.251,32,32,0,Math.PI*0.5,0,Math.PI*0.3);
+const landMat=new THREE.MeshPhongMaterial({color:0x44ff44,opacity:0.7,transparent:true});
+[0,2,4].forEach(r=>{
+const land=new THREE.Mesh(landGeo,landMat);
+land.rotation.y=r;
+globeGroup.add(land);
+});
+}
+
+function loadFont(){
+const loader=new FontLoader();
+loader.load('https://unpkg.com/three@0.150.1/examples/fonts/helvetiker_regular.typeface.json',f=>{
+font=f;
+updateNewsDisplay();
+});
+}
+
+function latLonToVector3(lat,lon,radius){
+const phi=(90-lat)*(Math.PI/180);
+const theta=(lon+180)*(Math.PI/180);
+return new THREE.Vector3(
+-radius*Math.sin(phi)*Math.cos(theta),
+radius*Math.cos(phi),
+radius*Math.sin(phi)*Math.sin(theta)
+);
+}
+
+function createNewsMarkers(){
+newsMarkers.forEach(m=>globe.remove(m));
+newsMarkers=[];
+newsData.forEach((news,i)=>{
+const markerGroup=new THREE.Group();
+// Pin
+const pinGeo=new THREE.ConeGeometry(0.01,0.03,8);
+const pinMat=new THREE.MeshPhongMaterial({
+color:i===activeNews?0xff0000:0xffff00,
+emissive:i===activeNews?0xff0000:0xffaa00,
+emissiveIntensity:0.5
+});
+const pin=new THREE.Mesh(pinGeo,pinMat);
+pin.position.y=0.015;
+pin.rotation.x=Math.PI;
+markerGroup.add(pin);
+// Pulse ring
+const ringGeo=new THREE.RingGeometry(0.01,0.02,16);
+const ringMat=new THREE.MeshBasicMaterial({color:0xffffff,opacity:0.5,transparent:true,side:THREE.DoubleSide});
+const ring=new THREE.Mesh(ringGeo,ringMat);
+ring.rotation.x=-Math.PI/2;
+markerGroup.add(ring);
+markerGroup.userData={ring,news,index:i};
+// Position on globe
+const pos=latLonToVector3(news.lat,news.lon,0.25);
+markerGroup.position.copy(pos);
+markerGroup.lookAt(globe.position);
+globe.add(markerGroup);
+newsMarkers.push(markerGroup);
+});
+}
+
+function createNewsPanel(){
+const panelGroup=new THREE.Group();
+// Background
+const bgGeo=new THREE.PlaneGeometry(0.4,0.15);
+const bgMat=new THREE.MeshBasicMaterial({color:0x000033,opacity:0.9,transparent:true});
+const bg=new THREE.Mesh(bgGeo,bgMat);
+panelGroup.add(bg);
+// Border
+const borderGeo=new THREE.EdgesGeometry(bgGeo);
+const borderMat=new THREE.LineBasicMaterial({color:0x00ffff});
+const border=new THREE.LineSegments(borderGeo,borderMat);
+panelGroup.add(border);
+panelGroup.position.set(0,-0.25,-0.5);
+scene.add(panelGroup);
+newsPanel=panelGroup;
+}
+
+function updateNewsDisplay(){
+if(!font||!newsData.length)return;
+// Remove old text
+if(newsText)newsPanel.remove(newsText);
+const news=newsData[activeNews];
+// Create new text
+const textGeo=new TextGeometry(`${news.city}, ${news.country}\n${news.headline}`.substring(0,50),{
+font:font,
+size:0.015,
+height:0.001
+});
+textGeo.center();
+const textMat=new THREE.MeshBasicMaterial({color:0xffffff});
+newsText=new THREE.Mesh(textGeo,textMat);
+newsPanel.add(newsText);
+// Update markers
+createNewsMarkers();
+}
+
+async function startARSession(){
+if(!navigator.xr)return alert('WebXR not supported');
+try{
+const supported=await navigator.xr.isSessionSupported('immersive-ar');
+if(supported){
+const session=await navigator.xr.requestSession('immersive-ar',{
+requiredFeatures:['hit-test'],
+optionalFeatures:['dom-overlay'],
+domOverlay:{root:document.body}
+});
+onSessionStarted(session);
+}
+}catch(e){alert('Failed to start AR:'+e.message);}
+}
+
+function onSessionStarted(session){
+xrSession=session;
+document.getElementById('overlay').classList.add('webxr-hidden');
+renderer.xr.setReferenceSpaceType('local');
+renderer.xr.setSession(session);
+setupControllers();
+renderer.setAnimationLoop(render);
+session.addEventListener('end',()=>{
+document.getElementById('overlay').classList.remove('webxr-hidden');
+renderer.setAnimationLoop(null);
+xrSession=null;
+});
+}
+
+function setupControllers(){
+controllers=[];
+for(let i=0;i<2;i++){
+const controller=renderer.xr.getController(i);
+controller.addEventListener('selectstart',()=>{
+activeNews=(activeNews+1)%newsData.length;
+updateNewsDisplay();
+focusTime=clock.getElapsedTime();
+autoRotate=false;
+});
+scene.add(controller);
+controllers.push(controller);
+}
+}
+
+function render(time,frame){
+if(frame){
+const elapsed=clock.getElapsedTime();
+// Auto-rotate globe
+if(autoRotate){
+globe.rotation.y+=0.002;
+}
+// Auto advance news every 5 seconds
+if(elapsed-focusTime>5){
+activeNews=(activeNews+1)%newsData.length;
+updateNewsDisplay();
+focusTime=elapsed;
+// Focus on news location
+const news=newsData[activeNews];
+const targetRot=-news.lon*Math.PI/180;
+globe.rotation.y+=(targetRot-globe.rotation.y)*0.05;
+}
+// Animate markers
+newsMarkers.forEach((m,i)=>{
+const ring=m.userData.ring;
+const scale=i===activeNews?1+Math.sin(elapsed*3)*0.2:1;
+ring.scale.setScalar(scale);
+ring.material.opacity=i===activeNews?0.8:0.3;
+});
+// Pulse active marker
+if(newsMarkers[activeNews]){
+const pin=newsMarkers[activeNews].children[0];
+pin.material.emissiveIntensity=0.5+Math.sin(elapsed*5)*0.3;
+}
+}
+renderer.render(scene,camera);
+}
+
+init();
+</script>
+</body>
+</html>
